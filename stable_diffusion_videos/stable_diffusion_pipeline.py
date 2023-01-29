@@ -202,6 +202,7 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         text_embeddings: Optional[torch.FloatTensor] = None,
+        uncond_embeddings: Optional[torch.FloatTensor] = None,
         **kwargs,
     ):
         r"""
@@ -333,15 +334,16 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
             else:
                 uncond_tokens = negative_prompt
 
-            max_length = self.tokenizer.model_max_length
-            uncond_input = self.tokenizer(
-                uncond_tokens,
-                padding="max_length",
-                max_length=max_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
+            if uncond_embeddings is None:
+                max_length = self.tokenizer.model_max_length
+                uncond_input = self.tokenizer(
+                    uncond_tokens,
+                    padding="max_length",
+                    max_length=max_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
 
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = uncond_embeddings.shape[1]
@@ -520,6 +522,17 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
             batch_size,
         )
 
+        uncond_embeddings = None
+        if negative_prompt is None:
+            uncond_input = self.tokenizer(
+                [""],
+                padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
+
         frame_index = skip
         for _, embeds_batch, noise_batch in batch_generator:
             outputs = self(
@@ -532,6 +545,7 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
                 num_inference_steps=num_inference_steps,
                 output_type="pil" if not upsample else "numpy",
                 negative_prompt=negative_prompt,
+                uncond_embeddings=uncond_embeddings,
             )["images"]
 
             for image in outputs:
