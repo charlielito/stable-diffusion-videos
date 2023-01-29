@@ -210,6 +210,7 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
         latents: Optional[jnp.array] = None,
         neg_prompt_ids: jnp.array = None,
         text_embeddings: Optional[jnp.array] = None,
+        uncond_embeddings: Optional[jnp.array] = None,
     ):
         # 0. Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
@@ -234,7 +235,7 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
             batch_size = text_embeddings.shape[0]
             max_length = self.tokenizer.model_max_length
 
-        if neg_prompt_ids is None:
+        if neg_prompt_ids is None and uncond_embeddings is None:
             uncond_input = self.tokenizer(
                 [""] * batch_size,
                 padding="max_length",
@@ -243,9 +244,12 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
             ).input_ids
         else:
             uncond_input = neg_prompt_ids
-        uncond_embeddings = self.text_encoder(
-            uncond_input, params=params["text_encoder"]
-        )[0]
+
+        if uncond_embeddings is None:
+            uncond_embeddings = self.text_encoder(
+                uncond_input, params=params["text_encoder"]
+            )[0]
+
         context = jnp.concatenate([uncond_embeddings, text_embeddings])
 
         latents_shape = (
@@ -338,6 +342,7 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
         jit: bool = False,
         neg_prompt_ids: jnp.array = None,
         text_embeddings: Optional[jnp.array] = None,
+        uncond_embeddings: Optional[jnp.array] = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -410,6 +415,7 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
                 latents,
                 neg_prompt_ids,
                 text_embeddings,
+                uncond_embeddings,
             )
         else:
             images = self._generate(
@@ -423,6 +429,7 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
                 latents,
                 neg_prompt_ids,
                 text_embeddings,
+                uncond_embeddings,
             )
 
         if self.safety_checker is not None:
@@ -568,6 +575,24 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
 
         # TODO: convert negative_prompt to neg_prompt_ids
 
+        uncond_embeddings = None
+        if negative_prompt is None:
+            uncond_input = self.tokenizer(
+                [""],
+                padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="np",
+            ).input_ids
+
+            uncond_embeddings = self.text_encoder(
+                uncond_input, params=text_encoder_params
+            )[0]
+            # Replicate uncond_embeddings to match batch size
+            replicate_num = NUM_TPU_CORES * batch_size if jit else batch_size
+            uncond_embeddings = np.repeat(uncond_embeddings, replicate_num, axis=0)
+            if jit:
+                uncond_embeddings = shard(uncond_embeddings)
+
         frame_index = skip
         for _, embeds_batch, noise_batch in batch_generator:
             if jit:
@@ -594,6 +619,7 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
                 output_type="pil" if not upsample else "numpy",
                 neg_prompt_ids=negative_prompt,
                 jit=jit,
+                uncond_embeddings=uncond_embeddings,
             )["images"]
 
             if jit:
@@ -902,7 +928,7 @@ class FlaxStableDiffusionWalkPipeline(FlaxDiffusionPipeline):
 # guidance_scale is a scalar, so it's broadcasted to all devices (hence `None`) without needing to be static.
 @partial(
     jax.pmap,
-    in_axes=(None, 0, 0, 0, None, None, None, None, 0, 0, 0),
+    in_axes=(None, 0, 0, 0, None, None, None, None, 0, 0, 0, 0),
     static_broadcasted_argnums=(0, 4, 5, 6),
 )
 def _p_generate(
@@ -917,6 +943,7 @@ def _p_generate(
     latents,
     neg_prompt_ids,
     text_embeddings,
+    uncond_embeddings,
 ):
     return pipe._generate(
         prompt_ids,
@@ -929,6 +956,7 @@ def _p_generate(
         latents,
         neg_prompt_ids,
         text_embeddings,
+        uncond_embeddings,
     )
 
 
